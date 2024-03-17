@@ -32,6 +32,7 @@ type g =
   ; mutable pool0_size : int
   ; mutable reseed_count : int
   ; mutable last_reseed : int64
+  ; mutable generated_since_rekey : int
   ; time : (unit -> int64) option
   }
 
@@ -44,6 +45,7 @@ let create ?time () =
   ; pool0_size = 0
   ; reseed_count = 0
   ; last_reseed = 0L
+  ; generated_since_rekey = 0
   ; time
   }
 
@@ -54,7 +56,8 @@ let seeded ~g =
 (* XXX We might want to erase the old key. *)
 let set_key ~g sec =
   g.secret <- sec ;
-  g.key    <- AES_CTR.of_secret (Cstruct.of_string sec)
+  g.key    <- AES_CTR.of_secret (Cstruct.of_string sec);
+  g.generated_since_rekey <- 0
 
 let reseedi ~g iter =
   set_key ~g @@ SHAd256.digesti (fun f -> f g.secret; iter f);
@@ -65,13 +68,18 @@ let iter1 a     f = f a
 let reseed ~g cs = reseedi ~g (iter1 cs)
 
 let generate_rekey ~g buf ~off len =
-  let b  = len // block + 2 in
+  let b  = len // block in
   let n  = b * block in
   let r  = Cstruct.to_string (AES_CTR.stream ~key:g.key ~ctr:g.ctr n) in
   Bytes.blit_string r 0 buf off len;
-  let r2 = String.sub r (n - 32) 32 in
-  set_key ~g r2 ;
-  g.ctr <- AES_CTR.add_ctr g.ctr (Int64.of_int b)
+  g.generated_since_rekey <- g.generated_since_rekey + n;
+  g.ctr <- AES_CTR.add_ctr g.ctr (Int64.of_int b);
+  if g.generated_since_rekey >= 0x10000 then begin
+    assert (block * 2 = 32);
+    let r = Cstruct.to_string (AES_CTR.stream ~key:g.key ~ctr:g.ctr 32) in
+    set_key ~g r ;
+    g.ctr <- AES_CTR.add_ctr g.ctr 2L
+  end
 
 let add_pool_entropy g =
   if g.pool0_size > min_pool_size then
